@@ -71,8 +71,8 @@ Each container:
 ### Install
 
 ```bash
-git clone <this-repo> toastbrowser
-cd toastbrowser
+git clone https://github.com/SecTrollz/cloudbrowser.git
+cd cloudbrowser
 chmod +x setup.sh toast.sh
 ./setup.sh
 ```
@@ -85,12 +85,12 @@ That's it. Dashboard opens at **http://localhost:8080**
 
 | Profile | Browser | Locale | Use Case |
 |---|---|---|---|
-| 💼 work | Chrome | en-US / New York | Work accounts, Google Workspace |
-| 🏠 personal | Firefox | en-GB / London | Personal email, shopping |
-| 🔬 research | Tor Browser | de-DE / Berlin | Anonymous research, OSINT |
-| 📱 social | Chrome | en-AU / Sydney | Social media, forums |
-| 🏦 banking | Firefox | en-US / Chicago | Financial accounts |
-| 💻 dev | Chromium | en-US / LA | Dev tools, localhost testing |
+|  work | Chrome | en-US / New York | Work accounts, Google Workspace |
+|  personal | Firefox | en-GB / London | Personal email, shopping |
+|  research | Tor Browser | de-DE / Berlin | Anonymous research, OSINT |
+|  social | Chrome | en-AU / Sydney | Social media, forums |
+|  banking | Firefox | en-US / Chicago | Financial accounts |
+|  dev | Chromium | en-US / LA | Dev tools, localhost testing |
 
 ---
 
