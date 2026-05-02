@@ -1,4 +1,4 @@
-# 🍞 toast browser
+# 🍞 Toast Browser
 
 **Self-hosted, Docker-based isolated browser profiles.**  
 A single-user alternative to NetworkChuck's cloud browser — runs entirely on your machine, zero cloud dependency, zero subscription.
