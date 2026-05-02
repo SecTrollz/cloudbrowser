@@ -1,0 +1,229 @@
+version: "3.9"
+
+# ╔═══════════════════════════════════════════════════════╗
+# ║           TOAST BROWSER — Single User Stack           ║
+# ║  Isolated, fingerprint-separated browser profiles     ║
+# ║  Built on KasmVNC open source streaming technology    ║
+# ╚═══════════════════════════════════════════════════════╝
+
+networks:
+  toast_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+
+volumes:
+  profile_work:
+  profile_personal:
+  profile_research:
+  profile_social:
+  profile_banking:
+  profile_dev:
+  dashboard_data:
+
+services:
+
+  # ─────────────────────────────────────────────
+  # Dashboard — The control panel UI
+  # ─────────────────────────────────────────────
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: toast_dashboard
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - dashboard_data:/data
+      - ./profiles:/profiles:ro
+    environment:
+      - TOAST_SECRET=${TOAST_SECRET:-changeme_use_env_file}
+    networks:
+      toast_net:
+        ipv4_address: 172.20.0.2
+    labels:
+      - "toast.role=dashboard"
+
+  # ─────────────────────────────────────────────
+  # PROFILE: Work — Chrome, professional persona
+  # ─────────────────────────────────────────────
+  browser_work:
+    image: kasmweb/chrome:1.16.0
+    container_name: toast_work
+    restart: unless-stopped
+    shm_size: "512m"
+    ports:
+      - "6901:6901"
+    volumes:
+      - profile_work:/home/kasm-user
+    environment:
+      - VNC_PW=${WORK_VNC_PW:-workpass123}
+      - KASM_SVC_AUDIO=0
+      # Fingerprint overrides
+      - LANG=en-US
+      - TZ=America/New_York
+    networks:
+      toast_net:
+        ipv4_address: 172.20.0.10
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - "toast.role=browser"
+      - "toast.profile=work"
+      - "toast.browser=chrome"
+      - "toast.color=#3B82F6"
+      - "toast.icon=💼"
+      - "toast.port=6901"
+
+  # ─────────────────────────────────────────────
+  # PROFILE: Personal — Firefox, home persona
+  # ─────────────────────────────────────────────
+  browser_personal:
+    image: kasmweb/firefox:1.16.0
+    container_name: toast_personal
+    restart: unless-stopped
+    shm_size: "512m"
+    ports:
+      - "6902:6901"
+    volumes:
+      - profile_personal:/home/kasm-user
+    environment:
+      - VNC_PW=${PERSONAL_VNC_PW:-personalpass123}
+      - KASM_SVC_AUDIO=0
+      - LANG=en-GB
+      - TZ=Europe/London
+    networks:
+      toast_net:
+        ipv4_address: 172.20.0.11
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - "toast.role=browser"
+      - "toast.profile=personal"
+      - "toast.browser=firefox"
+      - "toast.color=#F97316"
+      - "toast.icon=🏠"
+      - "toast.port=6902"
+
+  # ─────────────────────────────────────────────
+  # PROFILE: Research — Tor Browser, anonymous
+  # ─────────────────────────────────────────────
+  browser_research:
+    image: kasmweb/tor-browser:1.16.0
+    container_name: toast_research
+    restart: unless-stopped
+    shm_size: "512m"
+    ports:
+      - "6903:6901"
+    volumes:
+      - profile_research:/home/kasm-user
+    environment:
+      - VNC_PW=${RESEARCH_VNC_PW:-researchpass123}
+      - KASM_SVC_AUDIO=0
+      - LANG=de-DE
+      - TZ=Europe/Berlin
+    networks:
+      toast_net:
+        ipv4_address: 172.20.0.12
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - "toast.role=browser"
+      - "toast.profile=research"
+      - "toast.browser=tor"
+      - "toast.color=#8B5CF6"
+      - "toast.icon=🔬"
+      - "toast.port=6903"
+
+  # ─────────────────────────────────────────────
+  # PROFILE: Social — Chrome, social media
+  # ─────────────────────────────────────────────
+  browser_social:
+    image: kasmweb/chrome:1.16.0
+    container_name: toast_social
+    restart: unless-stopped
+    shm_size: "512m"
+    ports:
+      - "6904:6901"
+    volumes:
+      - profile_social:/home/kasm-user
+    environment:
+      - VNC_PW=${SOCIAL_VNC_PW:-socialpass123}
+      - KASM_SVC_AUDIO=0
+      - LANG=en-AU
+      - TZ=Australia/Sydney
+    networks:
+      toast_net:
+        ipv4_address: 172.20.0.13
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - "toast.role=browser"
+      - "toast.profile=social"
+      - "toast.browser=chrome"
+      - "toast.color=#EC4899"
+      - "toast.icon=📱"
+      - "toast.port=6904"
+
+  # ─────────────────────────────────────────────
+  # PROFILE: Banking — Firefox, financial
+  # ─────────────────────────────────────────────
+  browser_banking:
+    image: kasmweb/firefox:1.16.0
+    container_name: toast_banking
+    restart: unless-stopped
+    shm_size: "512m"
+    ports:
+      - "6905:6901"
+    volumes:
+      - profile_banking:/home/kasm-user
+    environment:
+      - VNC_PW=${BANKING_VNC_PW:-bankingpass123}
+      - KASM_SVC_AUDIO=0
+      - LANG=en-US
+      - TZ=America/Chicago
+    networks:
+      toast_net:
+        ipv4_address: 172.20.0.14
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - "toast.role=browser"
+      - "toast.profile=banking"
+      - "toast.browser=firefox"
+      - "toast.color=#10B981"
+      - "toast.icon=🏦"
+      - "toast.port=6905"
+
+  # ─────────────────────────────────────────────
+  # PROFILE: Dev — Chromium, development
+  # ─────────────────────────────────────────────
+  browser_dev:
+    image: kasmweb/chromium:1.16.0
+    container_name: toast_dev
+    restart: unless-stopped
+    shm_size: "512m"
+    ports:
+      - "6906:6901"
+    volumes:
+      - profile_dev:/home/kasm-user
+    environment:
+      - VNC_PW=${DEV_VNC_PW:-devpass123}
+      - KASM_SVC_AUDIO=0
+      - LANG=en-US
+      - TZ=America/Los_Angeles
+    networks:
+      toast_net:
+        ipv4_address: 172.20.0.15
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - "toast.role=browser"
+      - "toast.profile=dev"
+      - "toast.browser=chromium"
+      - "toast.color=#BE721B"
+      - "toast.icon=🍞"
+      - "toast.port=6906"
