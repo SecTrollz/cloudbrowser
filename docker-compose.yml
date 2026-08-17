@@ -66,6 +66,7 @@ services:
       # Fingerprint overrides
       - LANG=en-US
       - TZ=America/New_York
+      - VNCOPTIONS=-SecurityTypes None
     networks:
       toast_net:
         ipv4_address: 172.20.0.10
@@ -96,6 +97,7 @@ services:
       - KASM_SVC_AUDIO=0
       - LANG=en-GB
       - TZ=Europe/London
+      - VNCOPTIONS=-SecurityTypes None
     networks:
       toast_net:
         ipv4_address: 172.20.0.11
@@ -126,6 +128,7 @@ services:
       - KASM_SVC_AUDIO=0
       - LANG=de-DE
       - TZ=Europe/Berlin
+      - VNCOPTIONS=-SecurityTypes None
     networks:
       toast_net:
         ipv4_address: 172.20.0.12
@@ -156,6 +159,7 @@ services:
       - KASM_SVC_AUDIO=0
       - LANG=en-AU
       - TZ=Australia/Sydney
+      - VNCOPTIONS=-SecurityTypes None
     networks:
       toast_net:
         ipv4_address: 172.20.0.13
@@ -186,6 +190,7 @@ services:
       - KASM_SVC_AUDIO=0
       - LANG=en-US
       - TZ=America/Chicago
+      - VNCOPTIONS=-SecurityTypes None
     networks:
       toast_net:
         ipv4_address: 172.20.0.14
@@ -216,6 +221,7 @@ services:
       - KASM_SVC_AUDIO=0
       - LANG=en-US
       - TZ=America/Los_Angeles
+      - VNCOPTIONS=-SecurityTypes None
     networks:
       toast_net:
         ipv4_address: 172.20.0.15

@@ -6,14 +6,37 @@ Reads Docker labels to auto-discover browser profiles and serves the control pan
 
 import os
 import json
+import time
+import ssl
+import base64
+import asyncio
+import tempfile
+import threading
 import yaml
-from flask import Flask, render_template_string, jsonify, request, redirect
+import websockets
+from functools import wraps
+from flask import Flask, render_template_string, jsonify, request, redirect, Response
 import docker
+from vncdotool import api as vnc_api
 
 app = Flask(__name__)
 client = docker.from_env()
 
 COMPOSE_FILE = os.path.join(os.path.dirname(__file__), "docker-compose.yml")
+DEFAULT_SECRET_PLACEHOLDER = "changeme_use_env_file"
+TOAST_SECRET = os.environ.get("TOAST_SECRET", "")
+VNC_IDLE_TIMEOUT = int(os.environ.get("TOAST_VNC_IDLE_TIMEOUT", "300"))
+VNC_CONNECT_TIMEOUT = 10
+KASM_INTERNAL_PORT = "6901"
+KASM_WS_PATH = "/websockify"
+KASM_USER = "kasm_user"
+
+if not TOAST_SECRET or TOAST_SECRET == DEFAULT_SECRET_PLACEHOLDER:
+    print("=" * 60)
+    print("WARNING: TOAST_SECRET is unset or still the default placeholder.")
+    print("  /api/container/* and /api/control/* are running WITHOUT auth.")
+    print("  Set a real TOAST_SECRET in .env to require a bearer token.")
+    print("=" * 60)
 
 def parse_env(env_list):
     d = {}
@@ -63,6 +86,8 @@ def get_profiles():
             running = c.status == "running"
             name = labels.get("toast.profile", "unknown")
             deployed_names.add(name)
+            networks = c.attrs.get("NetworkSettings", {}).get("Networks", {}) or {}
+            ip = next(iter(networks.values()), {}).get("IPAddress", "")
             profiles.append({
                 "name": name,
                 "browser": labels.get("toast.browser", "chrome"),
@@ -70,6 +95,7 @@ def get_profiles():
                 "icon": labels.get("toast.icon", "🌐"),
                 "port": labels.get("toast.port", "6901"),
                 "container": c.name,
+                "ip": ip,
                 "deployed": True,
                 "running": running,
                 "status": c.status,
@@ -90,6 +116,7 @@ def get_profiles():
             "icon": spec["icon"],
             "port": spec["port"],
             "container": None,
+            "ip": "",
             "deployed": False,
             "running": False,
             "status": "not deployed",
@@ -113,6 +140,210 @@ def container_action(name, action):
         return {"ok": True}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+def require_auth(fn):
+    """Gate an endpoint behind Authorization: Bearer <TOAST_SECRET>.
+    No-op (auth disabled) if TOAST_SECRET is unset/still the placeholder —
+    see the startup warning printed above."""
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if TOAST_SECRET and TOAST_SECRET != DEFAULT_SECRET_PLACEHOLDER:
+            supplied = request.headers.get("Authorization", "")
+            if supplied != f"Bearer {TOAST_SECRET}":
+                return jsonify({"ok": False, "error": "unauthorized"}), 401
+        return fn(*args, **kwargs)
+    return wrapper
+
+def get_profile_by_name(name):
+    for p in get_profiles():
+        if p["name"] == name:
+            return p
+    return None
+
+def require_running_profile(name):
+    """Returns (profile, None) or (None, (response, status)) for route handlers."""
+    p = get_profile_by_name(name)
+    if p is None:
+        return None, (jsonify({"ok": False, "error": "no such profile"}), 404)
+    if not p["running"]:
+        return None, (jsonify({"ok": False, "error": "profile is not running"}), 409)
+    return p, None
+
+class VNCError(Exception):
+    pass
+
+class WSBridge:
+    """KasmVNC only exposes RFB tunneled inside a WebSocket at /websockify on
+    its HTTPS port (verified — no separate raw VNC TCP port is listening in
+    this image) — the exact same endpoint the browser's own noVNC client
+    connects to, self-signed cert, HTTP Basic Auth on the upgrade request,
+    'binary' subprotocol. vncdotool only speaks plain TCP RFB, so this runs a
+    local per-profile TCP listener that transparently forwards bytes to/from
+    that same WebSocket endpoint — a protocol shim, not an alternate path.
+
+    NOTE: each browser_* service needs VNCOPTIONS=-SecurityTypes None (see
+    docker-compose.yml) because this image's legacy classic-VNC-Auth
+    challenge doesn't validate against VNC_PW (its password file isn't
+    derived from it) — without disabling it, RFB auth fails outright and
+    nothing works, not even screenshots. With it disabled, screenshot
+    capture is fully verified working; mouse/keyboard control endpoints
+    exist and report success but have NOT been confirmed to actually land
+    input on the browser in testing — likely because that same legacy auth
+    layer is also how KasmVNC grants the "owner" (write/input) role from
+    its .kasmpasswd permission model, which a bare RFB connection bypassing
+    it never acquires. Fixing this needs figuring out how KasmVNC ties
+    input authorization to a WS-tunneled RFB session outside that legacy
+    challenge — not yet solved here."""
+
+    def __init__(self):
+        self._loop = asyncio.new_event_loop()
+        threading.Thread(target=self._loop.run_forever, daemon=True).start()
+        self._ports = {}
+        self._lock = threading.Lock()
+
+    def get_local_port(self, name, ip, password):
+        with self._lock:
+            cached = self._ports.get(name)
+        if cached:
+            return cached
+        fut = asyncio.run_coroutine_threadsafe(self._start_server(ip, password), self._loop)
+        local_port = fut.result(timeout=VNC_CONNECT_TIMEOUT)
+        with self._lock:
+            self._ports[name] = local_port
+        return local_port
+
+    def invalidate(self, name):
+        with self._lock:
+            self._ports.pop(name, None)
+
+    async def _start_server(self, ip, password):
+        async def handle(reader, writer):
+            url = f"wss://{ip}:{KASM_INTERNAL_PORT}{KASM_WS_PATH}"
+            auth = base64.b64encode(f"{KASM_USER}:{password}".encode()).decode()
+            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = ssl.CERT_NONE
+            try:
+                async with websockets.connect(
+                    url, subprotocols=["binary"],
+                    additional_headers={
+                        "Authorization": f"Basic {auth}",
+                        "Origin": f"https://{ip}:{KASM_INTERNAL_PORT}",
+                    },
+                    ssl=ssl_ctx, max_size=None,
+                ) as ws:
+                    async def tcp_to_ws():
+                        try:
+                            while True:
+                                data = await reader.read(65536)
+                                if not data:
+                                    break
+                                await ws.send(data)
+                        except Exception:
+                            pass
+                    async def ws_to_tcp():
+                        try:
+                            async for msg in ws:
+                                writer.write(msg)
+                                await writer.drain()
+                        except Exception:
+                            pass
+                    await asyncio.gather(tcp_to_ws(), ws_to_tcp())
+            finally:
+                writer.close()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        return server.sockets[0].getsockname()[1]
+
+ws_bridge = WSBridge()
+
+class VNCPool:
+    """Pools RFB (raw VNC, port 5901) connections to each profile's container,
+    reached directly over the toast_net bridge — the same session KasmVNC's own
+    web UI streams over websockets, not a separate automation channel.
+
+    One RLock per profile serializes all operations against that profile's
+    session (screenshot/move/click/type must not interleave on one RFB
+    connection); different profiles run fully concurrently. A daemon thread
+    reaps connections idle past VNC_IDLE_TIMEOUT."""
+
+    def __init__(self, idle_timeout=VNC_IDLE_TIMEOUT):
+        self._idle_timeout = idle_timeout
+        self._dict_lock = threading.Lock()
+        self._locks = {}
+        self._clients = {}
+        threading.Thread(target=self._reap_loop, daemon=True).start()
+
+    def _get_lock(self, name):
+        with self._dict_lock:
+            if name not in self._locks:
+                self._locks[name] = threading.RLock()
+            return self._locks[name]
+
+    def _connect(self, name, host, password):
+        local_port = ws_bridge.get_local_port(name, host, password)
+        vnc_client = vnc_api.connect(f"127.0.0.1::{local_port}", password=password,
+                                      timeout=VNC_CONNECT_TIMEOUT)
+        self._clients[name] = {"client": vnc_client, "last_used": time.time()}
+        return vnc_client
+
+    def invalidate(self, name):
+        entry = self._clients.pop(name, None)
+        if entry:
+            try:
+                entry["client"].disconnect()
+            except Exception:
+                pass
+        ws_bridge.invalidate(name)
+
+    def execute(self, name, host, password, op):
+        lock = self._get_lock(name)
+        with lock:
+            entry = self._clients.get(name)
+            vnc_client = entry["client"] if entry else self._connect(name, host, password)
+            try:
+                result = op(vnc_client)
+                self._clients[name]["last_used"] = time.time()
+                return result
+            except Exception:
+                self.invalidate(name)
+                try:
+                    vnc_client = self._connect(name, host, password)
+                    result = op(vnc_client)
+                    self._clients[name]["last_used"] = time.time()
+                    return result
+                except Exception as e:
+                    raise VNCError(str(e))
+
+    def _reap_loop(self):
+        while True:
+            time.sleep(30)
+            now = time.time()
+            with self._dict_lock:
+                stale = [n for n, e in self._clients.items()
+                         if now - e["last_used"] > self._idle_timeout]
+            for n in stale:
+                print(f"[vnc-pool] idle timeout, disconnecting '{n}'")
+                self.invalidate(n)
+
+vnc_pool = VNCPool()
+
+def _capture_png(vnc_client):
+    fd, path = tempfile.mkstemp(suffix=".png", dir="/tmp")
+    os.close(fd)
+    try:
+        vnc_client.captureScreen(path)
+        with open(path, "rb") as f:
+            return f.read()
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+def _type_text(vnc_client, text):
+    for ch in text:
+        vnc_client.keyPress("minus" if ch == "-" else ch)
 
 DASHBOARD_HTML = r"""<!DOCTYPE html>
 <html lang="en">
@@ -549,6 +780,84 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     .grid { grid-template-columns: 1fr; }
     .header-meta { display: none; }
   }
+
+  .switcher { margin-bottom: 40px; }
+
+  .switcher-strip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 8px;
+    margin-bottom: 10px;
+    position: sticky;
+    top: 88px;
+    z-index: 90;
+    overflow-x: auto;
+  }
+
+  .switcher-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    width: 52px;
+    flex-shrink: 0;
+    padding: 8px 0;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    background: transparent;
+    cursor: pointer;
+    color: var(--text);
+    font-family: var(--sans);
+  }
+
+  .switcher-item:hover { background: rgba(255,255,255,0.05); }
+
+  .switcher-item.active {
+    border-color: color-mix(in srgb, var(--profile-color) 40%, transparent);
+    background: color-mix(in srgb, var(--profile-color) 14%, transparent);
+  }
+
+  .switcher-item-disabled { opacity: 0.3; cursor: not-allowed; }
+
+  .switcher-icon { font-size: 18px; }
+  .switcher-key { font-family: var(--mono); font-size: 9px; color: var(--muted); }
+  .switcher-spacer { flex: 1; }
+
+  .workspace-frame-wrap {
+    position: relative;
+    min-height: 640px;
+    border-radius: 16px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    background: var(--surface);
+  }
+
+  .workspace-iframe {
+    width: 100%;
+    height: 640px;
+    border: 0;
+    display: block;
+  }
+
+  .workspace-empty, .workspace-fallback {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    height: 640px;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 12px;
+    text-align: center;
+    padding: 40px;
+  }
+
+  .workspace-fallback p { max-width: 420px; line-height: 1.6; }
 </style>
 </head>
 <body>
@@ -569,6 +878,40 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </header>
 
 <main>
+
+  {% set switchable = profiles|selectattr('deployed')|list %}
+  {% if switchable %}
+  <div class="switcher" id="switcher">
+    <div class="switcher-strip" id="switcher-strip">
+      {% for p in switchable %}
+      <button class="switcher-item {{ '' if p.running else 'switcher-item-disabled' }}"
+              style="--profile-color: {{ p.color }}"
+              data-name="{{ p.name }}"
+              {{ 'disabled' if not p.running }}
+              onclick="switchProfile('{{ p.name }}')"
+              title="{{ p.name }} (press {{ loop.index }})">
+        <span class="switcher-icon">{{ p.icon }}</span>
+        <span class="switcher-key">{{ loop.index }}</span>
+      </button>
+      {% endfor %}
+      <div class="switcher-spacer"></div>
+      <a id="switcher-newtab" class="btn" target="_blank" style="max-width:160px; flex:none;">↗ Open in new tab</a>
+    </div>
+
+    <div class="workspace-frame-wrap" id="workspace-wrap">
+      <div class="workspace-empty" id="workspace-empty">
+        Select a profile above (or press 1–{{ switchable|length }}) to view it here.
+      </div>
+      <iframe id="workspace-frame" class="workspace-iframe" style="display:none;"
+              allow="clipboard-read; clipboard-write"></iframe>
+      <div class="workspace-fallback" id="workspace-fallback" style="display:none;">
+        <p>This profile hasn't loaded here yet — likely its self-signed certificate hasn't
+        been trusted in this browser, or KasmVNC's login hasn't been accepted once.</p>
+        <a id="workspace-fallback-link" class="btn btn-open" target="_blank">↗ Open once in a new tab to trust it, then come back</a>
+      </div>
+    </div>
+  </div>
+  {% endif %}
 
   <div class="privacy-panel">
     <div class="privacy-title">🔐 Fingerprint Isolation Architecture</div>
@@ -690,12 +1033,20 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </footer>
 
 <script>
+const TOAST_PROFILES = {{ profiles_json|safe }};
+const TOAST_TOKEN = {{ toast_token|tojson }};
+
+function apiFetch(url, opts = {}) {
+  opts.headers = Object.assign({}, opts.headers, TOAST_TOKEN ? {"Authorization": `Bearer ${TOAST_TOKEN}`} : {});
+  return fetch(url, opts);
+}
+
 async function containerAction(name, action) {
   const btn = event.target;
   btn.disabled = true;
   btn.textContent = '...';
   try {
-    const res = await fetch(`/api/container/${name}/${action}`, { method: 'POST' });
+    const res = await apiFetch(`/api/container/${name}/${action}`, { method: 'POST' });
     const data = await res.json();
     if (data.ok) {
       setTimeout(() => location.reload(), 1500);
@@ -720,6 +1071,63 @@ function copyPw(btn, pw) {
     setTimeout(() => btn.textContent = orig, 1200);
   });
 }
+
+let activeProfile = null;
+let loadWatchdog = null;
+
+function profileByName(name) { return TOAST_PROFILES.find(p => p.name === name); }
+
+function switchProfile(name) {
+  const p = profileByName(name);
+  if (!p || !p.running) return;
+  activeProfile = name;
+  localStorage.setItem('toast_last_profile', name);
+
+  document.querySelectorAll('.switcher-item').forEach(el =>
+    el.classList.toggle('active', el.dataset.name === name));
+
+  const host = location.hostname;
+  const url = `https://${host}:${p.port}/`;
+  document.getElementById('switcher-newtab').href = url;
+  document.getElementById('workspace-fallback-link').href = url;
+
+  const frame = document.getElementById('workspace-frame');
+  const empty = document.getElementById('workspace-empty');
+  const fallback = document.getElementById('workspace-fallback');
+
+  empty.style.display = 'none';
+  fallback.style.display = 'none';
+  frame.style.display = 'block';
+  frame.dataset.loaded = 'false';
+  frame.src = url;
+
+  clearTimeout(loadWatchdog);
+  loadWatchdog = setTimeout(() => {
+    if (frame.dataset.loaded !== 'true') {
+      frame.style.display = 'none';
+      fallback.style.display = 'flex';
+    }
+  }, 4000);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const frame = document.getElementById('workspace-frame');
+  if (!frame) return;
+  frame.addEventListener('load', () => { frame.dataset.loaded = 'true'; });
+
+  const last = localStorage.getItem('toast_last_profile');
+  const lastProfile = last ? profileByName(last) : null;
+  if (lastProfile && lastProfile.running) switchProfile(last);
+});
+
+window.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  const deployed = TOAST_PROFILES.filter(p => p.deployed);
+  const n = parseInt(e.key, 10);
+  if (!Number.isNaN(n) && n >= 1 && n <= deployed.length) {
+    switchProfile(deployed[n - 1].name);
+  }
+});
 </script>
 
 </body>
@@ -728,18 +1136,102 @@ function copyPw(btn, pw) {
 @app.route("/")
 def index():
     profiles = get_profiles()
-    return render_template_string(DASHBOARD_HTML, profiles=profiles)
+    profiles_json = json.dumps([
+        {"name": p["name"], "port": p["port"], "running": p["running"], "deployed": p["deployed"]}
+        for p in profiles
+    ])
+    toast_token = TOAST_SECRET if TOAST_SECRET and TOAST_SECRET != DEFAULT_SECRET_PLACEHOLDER else ""
+    return render_template_string(DASHBOARD_HTML, profiles=profiles,
+                                   profiles_json=profiles_json, toast_token=toast_token)
 
 @app.route("/api/profiles")
 def api_profiles():
     return jsonify(get_profiles())
 
 @app.route("/api/container/<name>/<action>", methods=["POST"])
+@require_auth
 def api_container(name, action):
     if action not in ("start", "stop", "restart"):
         return jsonify({"ok": False, "error": "invalid action"}), 400
     result = container_action(name, action)
     return jsonify(result)
 
+@app.route("/api/control/<name>/screenshot", methods=["GET"])
+@require_auth
+def api_control_screenshot(name):
+    p, err = require_running_profile(name)
+    if err:
+        return err
+    try:
+        png_bytes = vnc_pool.execute(name, p["ip"], p["vnc_pw"], _capture_png)
+    except VNCError as e:
+        return jsonify({"ok": False, "error": f"vnc error: {e}"}), 502
+    return Response(png_bytes, mimetype="image/png")
+
+@app.route("/api/control/<name>/move", methods=["POST"])
+@require_auth
+def api_control_move(name):
+    p, err = require_running_profile(name)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    x, y = data.get("x"), data.get("y")
+    if not isinstance(x, int) or not isinstance(y, int):
+        return jsonify({"ok": False, "error": "x and y (int) required"}), 400
+    try:
+        vnc_pool.execute(name, p["ip"], p["vnc_pw"], lambda c: c.mouseMove(x, y))
+    except VNCError as e:
+        return jsonify({"ok": False, "error": f"vnc error: {e}"}), 502
+    return jsonify({"ok": True})
+
+@app.route("/api/control/<name>/click", methods=["POST"])
+@require_auth
+def api_control_click(name):
+    p, err = require_running_profile(name)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    x, y, button = data.get("x"), data.get("y"), data.get("button", 1)
+    if not isinstance(x, int) or not isinstance(y, int):
+        return jsonify({"ok": False, "error": "x and y (int) required"}), 400
+    def op(c):
+        c.mouseMove(x, y)
+        c.mousePress(button)
+    try:
+        vnc_pool.execute(name, p["ip"], p["vnc_pw"], op)
+    except VNCError as e:
+        return jsonify({"ok": False, "error": f"vnc error: {e}"}), 502
+    return jsonify({"ok": True})
+
+@app.route("/api/control/<name>/type", methods=["POST"])
+@require_auth
+def api_control_type(name):
+    p, err = require_running_profile(name)
+    if err:
+        return err
+    text = (request.get_json(silent=True) or {}).get("text", "")
+    if not isinstance(text, str) or not text:
+        return jsonify({"ok": False, "error": "text (str) required"}), 400
+    try:
+        vnc_pool.execute(name, p["ip"], p["vnc_pw"], lambda c: _type_text(c, text))
+    except VNCError as e:
+        return jsonify({"ok": False, "error": f"vnc error: {e}"}), 502
+    return jsonify({"ok": True})
+
+@app.route("/api/control/<name>/keypress", methods=["POST"])
+@require_auth
+def api_control_keypress(name):
+    p, err = require_running_profile(name)
+    if err:
+        return err
+    key = (request.get_json(silent=True) or {}).get("key", "")
+    if not key:
+        return jsonify({"ok": False, "error": "key (str) required, e.g. Return, Tab, ctrl-a"}), 400
+    try:
+        vnc_pool.execute(name, p["ip"], p["vnc_pw"], lambda c: c.keyPress(key))
+    except VNCError as e:
+        return jsonify({"ok": False, "error": f"vnc error: {e}"}), 502
+    return jsonify({"ok": True})
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, debug=False)
+    app.run(host="0.0.0.0", port=8080, debug=False, threaded=True)

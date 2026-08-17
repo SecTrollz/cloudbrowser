@@ -37,7 +37,8 @@ Each container:
   ├── Own Docker volume   (cookies, history, extensions)
   ├── Own IP on toast_net (172.20.0.x)
   ├── Own locale + TZ     (affects JS navigator, Date APIs)
-  └── KasmVNC streamed    (browser code never runs locally)
+  ├── KasmVNC streamed    (browser code never runs locally)
+  └── :5901 internal-only (RFB, dashboard-reachable — automation control API)
 ```
 
 ---
@@ -122,6 +123,40 @@ Each profile itself is served over **HTTPS** by KasmVNC with a self-signed cert 
 
 ---
 
+## Workspace Switcher
+
+The dashboard has an in-page switcher strip above the profile grid — click a profile icon (or press `1`-`6`) to view it live in an embedded panel, instead of opening a new tab per profile every time. `Open in new tab` is still there as a fallback.
+
+One-time friction to be aware of: each profile is its own HTTPS origin with its own self-signed cert, so the *first* time you switch to a given profile it may fail to embed (a browser won't let you click through a cert warning inside an iframe). If that happens, use `Open in new tab` once, accept the cert warning there, then come back to the dashboard — the switcher will embed it live from then on. The real fix for this friction is fronting everything behind a single reverse-proxied domain with one real cert (see `oci-cloud-init.sh`, which already scaffolds a `caddy/` directory for this) — not yet wired up.
+
+## Automation Control API
+
+Each profile also exposes a small control API so an external caller (e.g. your own script or AI agent) can drive it through the *same* channel a human uses — the live KasmVNC/RFB session — rather than a separate automation-only path:
+
+| Method | Path | Body | Returns |
+|---|---|---|---|
+| GET | `/api/control/<name>/screenshot` | — | `image/png` |
+| POST | `/api/control/<name>/move` | `{"x":int,"y":int}` | `{"ok":true}` |
+| POST | `/api/control/<name>/click` | `{"x":int,"y":int,"button":1}` | `{"ok":true}` |
+| POST | `/api/control/<name>/type` | `{"text":"..."}` | `{"ok":true}` |
+| POST | `/api/control/<name>/keypress` | `{"key":"enter"}` | `{"ok":true}` |
+
+Set a real `TOAST_SECRET` in `.env` and send it as `Authorization: Bearer <TOAST_SECRET>` — with it set, both this API and the container start/stop/restart API require it; with it unset (or left as the placeholder), auth is off (logged loudly on startup).
+
+```bash
+curl -H "Authorization: Bearer $TOAST_SECRET" \
+  http://127.0.0.1:8080/api/control/work/screenshot -o work.png
+
+curl -X POST -H "Authorization: Bearer $TOAST_SECRET" -H "Content-Type: application/json" \
+  -d '{"x":400,"y":300}' http://127.0.0.1:8080/api/control/work/click
+```
+
+`keypress`/`type` use [vncdotool's key names](https://vncdotool.readthedocs.io/) — lowercase (`"enter"`, `"tab"`, `"ctrl"`), not the RFB `KEY_*` constant names.
+
+**Known limitation — keyboard/click input is not confirmed working.** Screenshot capture is fully verified (real PNGs from all 6 profiles). Mouse/keyboard endpoints return `200 {"ok":true}` and raw-byte inspection confirms correctly-formatted RFB events are actually transmitted, but independent before/after testing showed no effect landing on the browser. The likely cause: this KasmVNC image's classic VNC-Auth challenge doesn't validate against `VNC_PW` at all (its password file isn't derived from it), so it has to be disabled (`VNCOPTIONS=-SecurityTypes None` in `docker-compose.yml`) just to get RFB auth — and *including* screenshot access — working at all. That same legacy auth step may be how KasmVNC normally grants the "owner" (write/input) role from its `.kasmpasswd` permission model; bypassing it may mean the tunnel never acquires that role, leaving it view-only. Fixing this needs figuring out how to get input authorization on a bare WS-tunneled RFB connection without going through that broken legacy step — not yet solved. If you pick this up: `WSBridge`'s docstring in `app.py` has the full technical trail.
+
+---
+
 ## Adding a New Profile
 
 1. Add a new service block to `docker-compose.yml` following the existing pattern
@@ -141,9 +176,9 @@ Available browser images from KasmWeb:
 
 ## Hardening for Production Use
 
-### 1. Change All VNC Passwords
+### 1. Change All VNC Passwords, and Set a Real TOAST_SECRET
 
-Edit `.env` before first launch. Passwords must be 6+ chars.
+Edit `.env` before first launch. VNC passwords must be 6+ chars. `TOAST_SECRET` gates the container-control and automation-control APIs (see [Automation Control API](#automation-control-api)) — leaving it as the placeholder runs both with no auth.
 
 ### 2. Add a Reverse Proxy with TLS
 
