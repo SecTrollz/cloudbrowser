@@ -6,11 +6,14 @@ Reads Docker labels to auto-discover browser profiles and serves the control pan
 
 import os
 import json
+import yaml
 from flask import Flask, render_template_string, jsonify, request, redirect
 import docker
 
 app = Flask(__name__)
 client = docker.from_env()
+
+COMPOSE_FILE = os.path.join(os.path.dirname(__file__), "docker-compose.yml")
 
 def parse_env(env_list):
     d = {}
@@ -20,22 +23,54 @@ def parse_env(env_list):
             d[k] = v
     return d
 
+def get_compose_browser_services():
+    """Read docker-compose.yml for every service labeled toast.role=browser,
+    regardless of whether it's ever been created in Docker yet."""
+    services = {}
+    try:
+        with open(COMPOSE_FILE) as f:
+            compose = yaml.safe_load(f) or {}
+        for service_name, spec in (compose.get("services") or {}).items():
+            labels = spec.get("labels") or []
+            label_map = {}
+            for item in labels:
+                if isinstance(item, str) and "=" in item:
+                    k, v = item.split("=", 1)
+                    label_map[k] = v
+            if label_map.get("toast.role") != "browser":
+                continue
+            services[label_map.get("toast.profile", service_name)] = {
+                "service": service_name,
+                "browser": label_map.get("toast.browser", "chrome"),
+                "color": label_map.get("toast.color", "#6B7280"),
+                "icon": label_map.get("toast.icon", "🌐"),
+                "port": label_map.get("toast.port", "6901"),
+            }
+    except Exception as e:
+        print(f"Compose parse error: {e}")
+    return services
+
 def get_profiles():
-    """Auto-discover browser profiles from Docker labels."""
+    """Combine live Docker containers with profiles only defined in docker-compose.yml
+    so undeployed profiles show up instead of silently disappearing."""
     profiles = []
+    deployed_names = set()
     try:
         containers = client.containers.list(all=True, filters={"label": "toast.role=browser"})
         for c in containers:
             labels = c.labels
             env = parse_env(c.attrs.get("Config", {}).get("Env", []))
             running = c.status == "running"
+            name = labels.get("toast.profile", "unknown")
+            deployed_names.add(name)
             profiles.append({
-                "name": labels.get("toast.profile", "unknown"),
+                "name": name,
                 "browser": labels.get("toast.browser", "chrome"),
                 "color": labels.get("toast.color", "#6B7280"),
                 "icon": labels.get("toast.icon", "🌐"),
                 "port": labels.get("toast.port", "6901"),
                 "container": c.name,
+                "deployed": True,
                 "running": running,
                 "status": c.status,
                 "lang": env.get("LANG", "en-US"),
@@ -44,6 +79,26 @@ def get_profiles():
             })
     except Exception as e:
         print(f"Docker error: {e}")
+
+    for name, spec in get_compose_browser_services().items():
+        if name in deployed_names:
+            continue
+        profiles.append({
+            "name": name,
+            "browser": spec["browser"],
+            "color": spec["color"],
+            "icon": spec["icon"],
+            "port": spec["port"],
+            "container": None,
+            "deployed": False,
+            "running": False,
+            "status": "not deployed",
+            "lang": "-",
+            "tz": "-",
+            "vnc_pw": "",
+            "deploy_cmd": f"docker compose up -d {spec['service']}",
+        })
+
     return sorted(profiles, key=lambda x: x["name"])
 
 def container_action(name, action):
@@ -249,6 +304,30 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     background: rgba(107,107,138,0.12);
     color: var(--muted);
     border: 1px solid rgba(107,107,138,0.2);
+  }
+
+  .badge-undeployed {
+    background: rgba(244,71,107,0.08);
+    color: var(--red);
+    border: 1px dashed rgba(244,71,107,0.3);
+  }
+
+  .card-undeployed { opacity: 0.75; }
+
+  .deploy-hint {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin: 16px 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    word-break: break-all;
   }
 
   .profile-name {
@@ -538,12 +617,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   <div class="grid" id="profiles-grid">
     {% for p in profiles %}
-    <div class="card" style="--profile-color: {{ p.color }}">
+    <div class="card {{ 'card-undeployed' if not p.deployed }}" style="--profile-color: {{ p.color }}">
       <div class="card-top">
         <div class="profile-icon">{{ p.icon }}</div>
+        {% if not p.deployed %}
+        <span class="badge badge-undeployed">⚠ not deployed</span>
+        {% else %}
         <span class="badge {{ 'badge-running' if p.running else 'badge-stopped' }}">
           {{ '● running' if p.running else '○ stopped' }}
         </span>
+        {% endif %}
       </div>
 
       <div class="profile-name">{{ p.name }}</div>
@@ -553,6 +636,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <span class="tag">isolated</span>
       </div>
 
+      {% if not p.deployed %}
+      <div class="deploy-hint">
+        <span id="cmd-{{ p.name }}">{{ p.deploy_cmd }}</span>
+        <button class="copy-btn" onclick="copyPw(this, '{{ p.deploy_cmd }}')" title="copy command">📋</button>
+      </div>
+      <div class="fingerprint-block">
+        <div class="fp-row"><span class="fp-key">status</span><span class="fp-val">defined in docker-compose.yml, container not created yet</span></div>
+      </div>
+      {% else %}
       <div class="fingerprint-block">
         <div class="fp-row"><span class="fp-key">locale</span><span class="fp-val">{{ p.lang }}</span></div>
         <div class="fp-row"><span class="fp-key">timezone</span><span class="fp-val">{{ p.tz }}</span></div>
@@ -567,9 +659,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <button class="copy-btn" onclick="copyPw(this, '{{ p.vnc_pw }}')" title="copy password">📋</button>
         </div>
       </div>
+      {% endif %}
 
       <div class="actions">
-        {% if p.running %}
+        {% if not p.deployed %}
+        <span class="btn" style="opacity:0.5; cursor:default;" title="run the command above on the host">not deployed</span>
+        {% elif p.running %}
         <a href="https://{{ request.host.split(':')[0] }}:{{ p.port }}" target="_blank" class="btn btn-open">↗ Open</a>
         <button class="btn btn-stop" onclick="containerAction('{{ p.container }}', 'stop')">■ Stop</button>
         <button class="btn" onclick="containerAction('{{ p.container }}', 'restart')">↺</button>

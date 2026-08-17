@@ -39,6 +39,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - dashboard_data:/data
       - ./profiles:/profiles:ro
+      - ./docker-compose.yml:/app/docker-compose.yml:ro
     environment:
       - TOAST_SECRET=${TOAST_SECRET:-changeme_use_env_file}
     networks:
