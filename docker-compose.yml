@@ -29,12 +29,12 @@ services:
   # ─────────────────────────────────────────────
   dashboard:
     build:
-      context: ./dashboard
+      context: .
       dockerfile: Dockerfile
     container_name: toast_dashboard
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - dashboard_data:/data
@@ -56,7 +56,7 @@ services:
     restart: unless-stopped
     shm_size: "512m"
     ports:
-      - "6901:6901"
+      - "0.0.0.0:6901:6901"
     volumes:
       - profile_work:/home/kasm-user
     environment:
@@ -87,7 +87,7 @@ services:
     restart: unless-stopped
     shm_size: "512m"
     ports:
-      - "6902:6901"
+      - "0.0.0.0:6902:6901"
     volumes:
       - profile_personal:/home/kasm-user
     environment:
@@ -117,7 +117,7 @@ services:
     restart: unless-stopped
     shm_size: "512m"
     ports:
-      - "6903:6901"
+      - "0.0.0.0:6903:6901"
     volumes:
       - profile_research:/home/kasm-user
     environment:
@@ -147,7 +147,7 @@ services:
     restart: unless-stopped
     shm_size: "512m"
     ports:
-      - "6904:6901"
+      - "0.0.0.0:6904:6901"
     volumes:
       - profile_social:/home/kasm-user
     environment:
@@ -177,7 +177,7 @@ services:
     restart: unless-stopped
     shm_size: "512m"
     ports:
-      - "6905:6901"
+      - "0.0.0.0:6905:6901"
     volumes:
       - profile_banking:/home/kasm-user
     environment:
@@ -207,7 +207,7 @@ services:
     restart: unless-stopped
     shm_size: "512m"
     ports:
-      - "6906:6901"
+      - "0.0.0.0:6906:6901"
     volumes:
       - profile_dev:/home/kasm-user
     environment:

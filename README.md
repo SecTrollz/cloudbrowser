@@ -77,7 +77,9 @@ chmod +x setup.sh toast.sh
 ./setup.sh
 ```
 
-That's it. Dashboard opens at **http://localhost:8080**
+That's it. Dashboard opens at **http://localhost:8080** (bound to localhost only — use an SSH tunnel to reach it on a remote server).
+
+Each profile itself is served over **HTTPS** by KasmVNC with a self-signed cert (accept the browser warning), and gated behind a login prompt — username `kasm_user`, password is that profile's `*_VNC_PW` from `.env`. The dashboard also shows each profile's password (click to reveal, or copy) so you don't need to open `.env` by hand.
 
 ---
 
@@ -170,12 +172,14 @@ Or pass Chrome/Firefox flags via KasmVNC's startup command environment.
 
 ### 4. Firewall the VNC Ports
 
-If running on a server, bind ports to localhost only:
+By default `docker-compose.yml` binds each profile's port to `0.0.0.0` so you can reach it from outside the host (e.g. a cloud VM's public IP). If you don't need that, bind to localhost instead and use an SSH tunnel or reverse proxy:
 
 ```yaml
 ports:
   - "127.0.0.1:6901:6901"
 ```
+
+If you keep the `0.0.0.0` binding on a cloud VM, lock down access at the network/firewall layer (e.g. security group / NSG rules limited to your IP) in addition to the VNC password — don't rely on the password alone for an internet-facing port.
 
 ### 5. Disposable Research Sessions
 

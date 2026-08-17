@@ -61,8 +61,9 @@ open_profile() {
   if [ -z "$port" ]; then
     echo -e "${RED}Profile '$name' not found.${RESET}"; exit 1
   fi
-  local url="http://localhost:${port}"
+  local url="https://localhost:${port}"
   echo -e "Opening ${BOLD}$name${RESET} → $url"
+  echo -e "  (self-signed cert — accept the browser warning; login user: ${BOLD}kasm_user${RESET}, password from .env)"
   if command -v xdg-open &>/dev/null; then xdg-open "$url"
   elif command -v open &>/dev/null; then open "$url"
   else echo "Navigate to: $url"

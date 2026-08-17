@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Ghost Browser Dashboard
+Toast Browser Dashboard
 Reads Docker labels to auto-discover browser profiles and serves the control panel.
 """
 
@@ -12,23 +12,35 @@ import docker
 app = Flask(__name__)
 client = docker.from_env()
 
+def parse_env(env_list):
+    d = {}
+    for item in env_list or []:
+        if "=" in item:
+            k, v = item.split("=", 1)
+            d[k] = v
+    return d
+
 def get_profiles():
     """Auto-discover browser profiles from Docker labels."""
     profiles = []
     try:
-        containers = client.containers.list(all=True, filters={"label": "ghost.role=browser"})
+        containers = client.containers.list(all=True, filters={"label": "toast.role=browser"})
         for c in containers:
             labels = c.labels
+            env = parse_env(c.attrs.get("Config", {}).get("Env", []))
             running = c.status == "running"
             profiles.append({
-                "name": labels.get("ghost.profile", "unknown"),
-                "browser": labels.get("ghost.browser", "chrome"),
-                "color": labels.get("ghost.color", "#6B7280"),
-                "icon": labels.get("ghost.icon", "🌐"),
-                "port": labels.get("ghost.port", "6901"),
+                "name": labels.get("toast.profile", "unknown"),
+                "browser": labels.get("toast.browser", "chrome"),
+                "color": labels.get("toast.color", "#6B7280"),
+                "icon": labels.get("toast.icon", "🌐"),
+                "port": labels.get("toast.port", "6901"),
                 "container": c.name,
                 "running": running,
                 "status": c.status,
+                "lang": env.get("LANG", "en-US"),
+                "tz": env.get("TZ", "UTC"),
+                "vnc_pw": env.get("VNC_PW", ""),
             })
     except Exception as e:
         print(f"Docker error: {e}")
@@ -52,7 +64,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Ghost Browser</title>
+<title>Toast Browser</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
 <style>
@@ -281,6 +293,36 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .fp-key { color: var(--muted); }
   .fp-val { color: var(--text); opacity: 0.7; }
 
+  .login-block {
+    background: color-mix(in srgb, var(--accent) 6%, var(--surface2));
+    border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border));
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin: 0 0 16px;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+    line-height: 1.8;
+  }
+
+  .pw-mask {
+    cursor: pointer;
+    user-select: none;
+    letter-spacing: 1px;
+  }
+
+  .copy-btn {
+    background: transparent;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 0 0 0 8px;
+    line-height: 1;
+  }
+
+  .copy-btn:hover { color: var(--accent); }
+
   .actions {
     display: flex;
     gap: 8px;
@@ -434,9 +476,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
 <header>
   <div class="logo">
-    <div class="logo-mark">👻</div>
+    <div class="logo-mark">🍞</div>
     <div>
-      <div class="logo-text">GHOST BROWSER</div>
+      <div class="logo-text">TOAST BROWSER</div>
       <div class="logo-sub">Isolated Profile Manager</div>
     </div>
   </div>
@@ -464,7 +506,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <div class="principle">
         <div class="principle-icon">🌐</div>
         <div class="principle-title">Network Isolation</div>
-        <div class="principle-text">Each container gets its own IP on the ghost_net bridge. No shared sockets.</div>
+        <div class="principle-text">Each container gets its own IP on the toast_net bridge. No shared sockets.</div>
       </div>
       <div class="principle">
         <div class="principle-icon">🖥️</div>
@@ -512,37 +554,23 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       </div>
 
       <div class="fingerprint-block">
-        {% if p.name == 'work' %}
-        <div class="fp-row"><span class="fp-key">locale</span><span class="fp-val">en-US / New York</span></div>
-        <div class="fp-row"><span class="fp-key">engine</span><span class="fp-val">Blink / V8</span></div>
-        <div class="fp-row"><span class="fp-key">ip-source</span><span class="fp-val">container 172.20.0.10</span></div>
-        {% elif p.name == 'personal' %}
-        <div class="fp-row"><span class="fp-key">locale</span><span class="fp-val">en-GB / London</span></div>
-        <div class="fp-row"><span class="fp-key">engine</span><span class="fp-val">Gecko / SpiderMonkey</span></div>
-        <div class="fp-row"><span class="fp-key">ip-source</span><span class="fp-val">container 172.20.0.11</span></div>
-        {% elif p.name == 'research' %}
-        <div class="fp-row"><span class="fp-key">locale</span><span class="fp-val">de-DE / Berlin</span></div>
-        <div class="fp-row"><span class="fp-key">engine</span><span class="fp-val">Gecko (Tor)</span></div>
-        <div class="fp-row"><span class="fp-key">routing</span><span class="fp-val">Tor Network</span></div>
-        {% elif p.name == 'social' %}
-        <div class="fp-row"><span class="fp-key">locale</span><span class="fp-val">en-AU / Sydney</span></div>
-        <div class="fp-row"><span class="fp-key">engine</span><span class="fp-val">Blink / V8</span></div>
-        <div class="fp-row"><span class="fp-key">ip-source</span><span class="fp-val">container 172.20.0.13</span></div>
-        {% elif p.name == 'banking' %}
-        <div class="fp-row"><span class="fp-key">locale</span><span class="fp-val">en-US / Chicago</span></div>
-        <div class="fp-row"><span class="fp-key">engine</span><span class="fp-val">Gecko / SpiderMonkey</span></div>
-        <div class="fp-row"><span class="fp-key">ip-source</span><span class="fp-val">container 172.20.0.14</span></div>
-        {% else %}
-        <div class="fp-row"><span class="fp-key">locale</span><span class="fp-val">en-US / Los Angeles</span></div>
-        <div class="fp-row"><span class="fp-key">engine</span><span class="fp-val">Blink (Chromium)</span></div>
-        <div class="fp-row"><span class="fp-key">ip-source</span><span class="fp-val">container 172.20.0.15</span></div>
-        {% endif %}
+        <div class="fp-row"><span class="fp-key">locale</span><span class="fp-val">{{ p.lang }}</span></div>
+        <div class="fp-row"><span class="fp-key">timezone</span><span class="fp-val">{{ p.tz }}</span></div>
         <div class="fp-row"><span class="fp-key">storage</span><span class="fp-val">isolated volume</span></div>
+      </div>
+
+      <div class="login-block">
+        <div class="fp-row"><span class="fp-key">user</span><span class="fp-val">kasm_user</span></div>
+        <div class="fp-row">
+          <span class="fp-key">pass</span>
+          <span class="fp-val pw-mask" data-pw="{{ p.vnc_pw }}" onclick="togglePw(this)" title="click to reveal">••••••••••••</span>
+          <button class="copy-btn" onclick="copyPw(this, '{{ p.vnc_pw }}')" title="copy password">📋</button>
+        </div>
       </div>
 
       <div class="actions">
         {% if p.running %}
-        <a href="http://localhost:{{ p.port }}" target="_blank" class="btn btn-open">↗ Open</a>
+        <a href="https://{{ request.host.split(':')[0] }}:{{ p.port }}" target="_blank" class="btn btn-open">↗ Open</a>
         <button class="btn btn-stop" onclick="containerAction('{{ p.container }}', 'stop')">■ Stop</button>
         <button class="btn" onclick="containerAction('{{ p.container }}', 'restart')">↺</button>
         {% else %}
@@ -562,8 +590,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </main>
 
 <footer>
-  <span>Ghost Browser — Self-Hosted · Open Source</span>
-  <span>All browsing isolated in Docker containers · No telemetry · No cloud</span>
+  <span>Toast Browser — Self-Hosted · Open Source</span>
+  <span>All browsing isolated in Docker containers · No telemetry · No cloud · No subscription</span>
 </footer>
 
 <script>
@@ -584,6 +612,18 @@ async function containerAction(name, action) {
     alert('Request failed: ' + e.message);
     btn.disabled = false;
   }
+}
+
+function togglePw(el) {
+  el.textContent = el.textContent.includes('•') ? el.dataset.pw : '••••••••••••';
+}
+
+function copyPw(btn, pw) {
+  navigator.clipboard.writeText(pw).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = '✓';
+    setTimeout(() => btn.textContent = orig, 1200);
+  });
 }
 </script>
 
