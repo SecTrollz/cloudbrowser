@@ -1,0 +1,7 @@
+# CA cert is a generated, rotatable secret (see proxy/README.md,
+# `handibot proxy-ca-cert <profile>`) - not source, don't commit it.
+# policy.json IS tracked: its content is fully determined by the static
+# profile->port map in handibot's config.py defaults, so it's checked in
+# like the old chrome-policy.json/firefox-policies.json were. Regenerate it
+# by hand if HANDIBOT_PROXY_CA_PORT_MAP is ever overridden from the default.
+*/ca-cert.pem
